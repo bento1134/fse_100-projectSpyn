@@ -9,8 +9,6 @@ from pybricks.ev3devices import TouchSensor
 ev3 = EV3Brick()
 touch_sensor = TouchSensor(Port.S1)
 
-estop = False
-
 while not touch_sensor.pressed():
     ev3.speaker.beep()
 

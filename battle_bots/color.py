@@ -28,9 +28,9 @@ try:
         if color in color_beep_frequencies:
             # Play the beep with the corresponding frequency
             ev3.speaker.beep(frequency=color_beep_frequencies[color], duration=50)
-        else:
+        #else:
             # Beep with a default frequency for unknown colors
-            ev3.speaker.beep(frequency=100, duration=50)
+        #    ev3.speaker.beep(frequency=100, duration=50)
 
         # Wait briefly before the next reading
 
