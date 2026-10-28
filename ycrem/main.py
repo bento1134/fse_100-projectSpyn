@@ -19,9 +19,9 @@ color_sensor = ColorSensor(Port.S4)
 robot = DriveBase(left_motor, right_motor, wheel_diameter=55.5, axle_track=104)
 
 last_color = None
-canidate = None
+candidate = None
 confidence = 0
-STABLE_READINGS = 5
+STABLE_READINGS = 8
 
 
 def emergency_stop():
@@ -30,13 +30,17 @@ def emergency_stop():
     right_motor.brake()
     # ev3.speaker.beep(frequency=500, duration=50)
 
+def autopilot():
+    # Implement your autopilot logic here
+    pass
+
 
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server_socket.bind(("0.0.0.0", 12345))
 server_socket.listen(1)
 print("Waiting for connection...")
 client_socket, address = server_socket.accept()
-print(f"Connected to {address}")
+#print(f"Connected to {address}")
 client_socket.settimeout(0.05)  # recv gives up after 50 ms so we can poll the button
 
 buf = ""
@@ -71,9 +75,12 @@ try:
                 elif key == "d":
                     robot.drive(0, 450)
                 elif key == "l":
-                    lift_motor.run_time(200, 100)
-            elif action == "u" and key in ("w", "a", "s", "d"):
+                    lift_motor.run(200)
+                elif key == "p":
+                    autopilot()
+            elif action == "u" and key in ("w", "a", "s", "d", "l"):
                 robot.stop()
+                lift_motor.brake()
 
         color = color_sensor.color()
 
@@ -84,7 +91,7 @@ try:
             count = 1
 
         # Check if the detected color has a corresponding beep frequency
-        if count >= STABLE_READINGS and candidate != last_color:
+        if confidence >= STABLE_READINGS and candidate != last_color:
             if candidate == Color.RED:
                 emergency_stop()
                 wait(1000)
