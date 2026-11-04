@@ -1,7 +1,7 @@
 #!/usr/bin/env pybricks-micropython
 import socket
 
-from pybricks.ev3devices import ColorSensor, Motor, TouchSensor
+from pybricks.ev3devices import ColorSensor, Motor, TouchSensor, UltrasonicSensor
 from pybricks.hubs import EV3Brick
 from pybricks.parameters import Color, Port
 from pybricks.robotics import DriveBase
@@ -15,6 +15,7 @@ lift_motor = Motor(Port.A)
 
 estop = TouchSensor(Port.S1)
 color_sensor = ColorSensor(Port.S4)
+ultra_sensor = UltrasonicSensor(Port.S2)
 
 robot = DriveBase(left_motor, right_motor, wheel_diameter=55.5, axle_track=104)
 
@@ -61,6 +62,7 @@ try:
                 break
             buf += data.decode()
 
+        print(ultra_sensor.distance())
         # 3. Process complete 2-char commands
         while len(buf) >= 2:
             key, action = buf[0], buf[1]
