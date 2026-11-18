@@ -18,21 +18,16 @@ ultra_sensor = UltrasonicSensor(Port.S2)
 gyro = GyroSensor(Port.S3)
 color_sensor = ColorSensor(Port.S4)
 
-robot = DriveBase(left_motor, right_motor, wheel_diameter=55.5, axle_track=104)
+robot = DriveBase(left_motor, right_motor, wheel_diameter=55.5, axle_track=175)
 
-# --- color debounce ---
-last_color = None
-candidate = None
-confidence = 0
-STABLE_READINGS = 8
-
-# --- maze tuning ---
-MAZE_SPEED = 250      # mm/s
+# --- Maze Tuning Parameters ---
+MAZE_SPEED = 150      # mm/s (slower speed for better stability and control)
 TARGET_DIST = 170     # mm from right wall
-OPEN_DIST = 375       # mm: right side considered open past this
-KP = 0.0              # deg/s per mm of error
-TURN_RATE = 60        # deg/s
-HEADING_TOL = 4       # deg
+OPEN_DIST = 375       # mm: right side considered open
+KP_WALL = 0.4         # Wall-following proportional gain
+KP_HEADING = 5.0      # Heading correction gain for driving straight
+KI_HEADING = 0.15
+TURN_RATE = 35        # Max turn rate (deg/s) - lowered to prevent over-turning
 
 clock = StopWatch()
 autopilot_active = False
@@ -49,46 +44,60 @@ def stop_all():
 
 
 def set_state(new_state):
-    global state, state_start
+    global state, state_start, heading_integral
     state = new_state
     state_start = clock.time()
+    heading_integral = 0
 
 
 def elapsed():
     return clock.time() - state_start
 
-def turn_to(target):
-    """Blocking gyro turn with slow-down near target and brake."""
+
+def drive_straight(speed, target_heading):
+    global heading_integral
+    error = target_heading - gyro.angle()
+    heading_integral = max(-100, min(100, heading_integral + error))
+    correction = KP_HEADING * error + KI_HEADING * heading_integral
+    correction = max(-60, min(60, correction))
+    robot.drive(speed, correction)
+
+def turn_to(target, timeout=4000):
     t = StopWatch()
-    while t.time() < 3000:                       # safety timeout
+    while t.time() < timeout:
         err = target - gyro.angle()
-        if abs(err) <= 2:
+        print("turn", target, gyro.angle(), err)
+        if abs(err) <= 1:
             robot.stop()
-            left_motor.brake()
-            right_motor.brake()
-            wait(150)                            # let it settle
-            if abs(target - gyro.angle()) <= 3:
-                return                           # truly there
-            continue                             # drifted past, correct it
-        rate = max(25, min(TURN_RATE, abs(err) * 2.5))
-        robot.drive(0, rate if err > 0 else -rate)
-        wait(5)
+            wait(200)
+            if abs(target - gyro.angle()) <= 2:
+                break
+
+        rate = max(-TURN_RATE, min(TURN_RATE, err * 2.0))
+        if 0 < rate < 12:
+            rate = 12
+        elif -12 < rate < 0:
+            rate = -12
+
+        robot.drive(0, rate)
+        wait(10)
     robot.stop()
+
 
 def start_turn(delta, then):
     global turn_target
-    # snap to a multiple of 90 so errors don't accumulate across turns
     turn_target = round((gyro.angle() + delta) / 90) * 90
     turn_to(turn_target)
     if turn_target == 0:
-        set_state("STRAIGHT")                    # Pledge counter back to 0
+        set_state("STRAIGHT")
     else:
         set_state(then)
 
 
 def autopilot_start():
-    global autopilot_active
-    gyro.reset_angle(0)                  # original heading = 0
+    global autopilot_active, turn_target
+    gyro.reset_angle(0)
+    turn_target = 0
     autopilot_active = True
     set_state("STRAIGHT")
 
@@ -100,29 +109,15 @@ def autopilot_stop():
 
 
 def autopilot_step():
-    heading = gyro.angle()
-
     if state == "STRAIGHT":
-        # Pledge: counter is 0, ignore walls and go straight until blocked
-        robot.drive(MAZE_SPEED, 0)
+        drive_straight(MAZE_SPEED, turn_target)
         if bumper.pressed():
             set_state("BACKUP")
 
     elif state == "BACKUP":
         robot.drive(-MAZE_SPEED, 0)
-        if elapsed() > 600:
-            start_turn(-90, "FOLLOW")    # turn left so wall is on the right
-
-    elif state == "TURN":
-        err = turn_target - heading
-        if abs(err) <= HEADING_TOL:
-            robot.stop()
-            if abs(heading) <= HEADING_TOL:
-                set_state("STRAIGHT")    # counter back to 0
-            else:
-                set_state(next_state)
-        else:
-            robot.drive(0, TURN_RATE if err > 0 else -TURN_RATE)
+        if elapsed() > 700:
+            start_turn(-90, "FOLLOW")
 
     elif state == "FOLLOW":
         if bumper.pressed():
@@ -130,20 +125,22 @@ def autopilot_step():
             return
         dist = ultra_sensor.distance()
         if dist > OPEN_DIST:
-            set_state("CLEAR_CORNER")    # opening on the right
+            set_state("CLEAR_CORNER")
             return
-        steer = max(-40, min(40, KP * (dist - TARGET_DIST)))
+        # Wall following with proportional steering
+        wall_error = dist - TARGET_DIST
+        steer = max(-30, min(30, KP_WALL * wall_error))
         robot.drive(MAZE_SPEED, steer)
 
     elif state == "CLEAR_CORNER":
-        robot.drive(MAZE_SPEED, 0)
+        drive_straight(MAZE_SPEED, turn_target)
         if bumper.pressed():
             set_state("BACKUP")
         elif elapsed() > 1000:
-            start_turn(90, "ENTER")      # turn right into the opening
+            start_turn(90, "ENTER")
 
     elif state == "ENTER":
-        robot.drive(MAZE_SPEED, 0)
+        drive_straight(MAZE_SPEED, turn_target)
         if bumper.pressed():
             set_state("BACKUP")
         elif elapsed() > 1000:
@@ -177,7 +174,7 @@ try:
                     autopilot_start()
                 elif key == "x":
                     autopilot_stop()
-                elif not autopilot_active:   # manual keys ignored in maze mode
+                elif not autopilot_active:
                     if key == "w":
                         robot.drive(900, 0)
                     elif key == "s":
@@ -196,22 +193,8 @@ try:
         if autopilot_active:
             autopilot_step()
 
-        color = color_sensor.color()
-        if color == candidate:
-            confidence += 1
-        else:
-            candidate = color
-            confidence = 1
-
-            #        if confidence >= STABLE_READINGS and candidate != last_color:
-                    #if candidate == Color.RED:
-                    #autopilot_stop()         # red tile = goal / stop
-                    #ev3.speaker.beep(frequency=500, duration=300)
-                #elif candidate == Color.BLUE:
-                #ev3.speaker.beep(frequency=500, duration=100)
-            #elif candidate == Color.GREEN:
-            #ev3.speaker.beep(frequency=800, duration=100)
-            #last_color = candidate
+        # Color sensor check can be re-enabled here if needed
+        
 finally:
     stop_all()
     client_socket.close()
