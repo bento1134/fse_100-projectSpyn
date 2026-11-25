@@ -40,7 +40,8 @@ def control_ev3(ev3_ip, ev3_port):
         ecodes.KEY_Q: 'q',  # Quit
         ecodes.KEY_L: 'l',
         ecodes.KEY_P: 'p',
-        ecodes.KEY_X: 'x'
+        ecodes.KEY_X: 'x',
+        ecodes.KEY_O: 'o'
     }
 
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

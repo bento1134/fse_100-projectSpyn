@@ -21,7 +21,7 @@ color_sensor = ColorSensor(Port.S4)
 robot = DriveBase(left_motor, right_motor, wheel_diameter=55.5, axle_track=175)
 
 # --- Maze Tuning Parameters ---
-MAZE_SPEED = 150      # mm/s
+MAZE_SPEED = 115      # mm/s
 TARGET_DIST = 170     # mm from right wall
 OPEN_DIST = 375       # mm: right side considered open
 KP_WALL = 0.4         # Wall-following proportional gain
@@ -40,14 +40,21 @@ TURN_TOL = 2
 # Actions: "PAUSE"  - stop for PAUSE_MS, then carry on
 #          "MANUAL" - turn autopilot off and give control to the driver (send 'p' to resume)
 #          "FINISH" - end of the maze: turn autopilot off and stop the robot
+#                     (does nothing until you press 'o' to arm it; fires once)
 # Remove a line to ignore that color; add a line to give another color an action.
 COLOR_ACTIONS = [
     (Color.RED,   "PAUSE"),
-    (Color.BLUE,  "MANUAL"),
-    (Color.GREEN, "FINISH"),
+    (Color.BLACK,  "MANUAL"),
+    (Color.GREEN, "FINISH")
 ]
 PAUSE_MS = 1000       # how long a "PAUSE" color stops the robot
-STABLE_READINGS = 8   # consecutive identical readings before a color counts
+STABLE_READINGS = 12   # consecutive identical readings before a color counts
+
+# --- Heading Snap (re-aligns the gyro to the maze walls) ---
+SNAP_WINDOW_MS = 1500 # wall distance must stay steady this long ...
+SNAP_DIST_TOL = 12    # ... within this many mm (robot is parallel to the wall)
+SNAP_MIN_ERR = 2      # deg: ignore heading errors smaller than this
+SNAP_MAX_ERR = 15     # deg: don't snap if the heading is further off than this
 
 # --- Debug Settings ---
 DEBUG = True          # master switch for all prints
@@ -65,6 +72,13 @@ last_log_time = 0
 last_color = None     # last confirmed color (actions only fire when this changes)
 candidate = None      # color currently being confirmed
 confidence = 0        # consecutive readings of candidate
+in_turn = False       # True while turn_to is running; colors are ignored then
+finish_armed = False  # FINISH does nothing until the driver sends 'o'
+
+# Heading snap state
+heading_offset = 0    # added to the gyro reading so heading() matches the maze walls
+wall_samples = []     # recent (time_ms, dist) readings while following a wall
+last_wall_sample = 0
 
 
 # ---------------------------------------------------------------- logging
@@ -87,10 +101,15 @@ def log_due():
 
 def sensors():
     return "gyro={} dist={} bump={}".format(
-        gyro.angle(), ultra_sensor.distance(), bumper.pressed())
+        heading(), ultra_sensor.distance(), bumper.pressed())
 
 
 # ---------------------------------------------------------------- helpers
+def heading():
+    """Gyro angle plus the snap correction. Use this instead of gyro.angle()."""
+    return gyro.angle() + heading_offset
+
+
 def stop_all():
     log("STOP", "stop_all()")
     robot.stop()
@@ -99,20 +118,55 @@ def stop_all():
 
 
 def set_state(new_state, reason=""):
-    global state, state_start
+    global state, state_start, wall_samples
     if DEBUG:
         log("STATE", "{} -> {} ({}) {}".format(state, new_state, reason, sensors()))
     state = new_state
     state_start = clock.time()
+    wall_samples = []     # a new state starts a fresh steady-wall measurement
 
 
 def elapsed():
     return clock.time() - state_start
 
 
+def try_snap(dist):
+    """Re-align the gyro to the maze while following a wall.
+
+    If the right-wall distance has stayed steady for SNAP_WINDOW_MS, the robot is
+    running parallel to that wall, so its true heading is turn_target (a multiple
+    of 90). Shift the gyro frame (software offset, no sensor reset) to match.
+    """
+    global heading_offset, wall_samples, last_wall_sample
+    now = clock.time()
+    if now - last_wall_sample < 50:
+        return
+    last_wall_sample = now
+
+    wall_samples.append((now, dist))
+    while now - wall_samples[0][0] > SNAP_WINDOW_MS:
+        wall_samples.pop(0)
+    if now - wall_samples[0][0] < SNAP_WINDOW_MS * 0.8:
+        return          # not enough history yet
+
+    dists = [s[1] for s in wall_samples]
+    if max(dists) - min(dists) > SNAP_DIST_TOL:
+        return          # distance is changing: not parallel to the wall
+
+    err = turn_target - heading()
+    if abs(err) < SNAP_MIN_ERR or abs(err) > SNAP_MAX_ERR:
+        return          # already aligned, or too far off to trust
+
+    before = heading()
+    heading_offset += err
+    log("SNAP", "wall steady ({}-{}mm): heading {} -> {} (turn_target {})".format(
+        min(dists), max(dists), before, heading(), turn_target))
+    wall_samples = []
+
+
 def drive_straight(speed, target_heading):
     """Drive straight while correcting heading using the gyro."""
-    angle = gyro.angle()
+    angle = heading()
     error = target_heading - angle
     correction = max(-HEADING_MAX, min(HEADING_MAX, KP_HEADING * error))
     robot.drive(speed, correction)
@@ -123,10 +177,12 @@ def drive_straight(speed, target_heading):
 
 def turn_to(target, timeout=None):
     """Gyro turn with slow-down near the target. Logs every step plus a summary."""
+    global in_turn
+    in_turn = True
     if timeout is None:
-        timeout = abs(target - gyro.angle()) * 60 + 1500
+        timeout = abs(target - heading()) * 60 + 1500
     t = StopWatch()
-    start_angle = gyro.angle()
+    start_angle = heading()
     direction = 1 if target > start_angle else -1
     peak_overshoot = 0
     iterations = 0
@@ -138,7 +194,7 @@ def turn_to(target, timeout=None):
         start_angle, target, target - start_angle))
 
     while t.time() < timeout:
-        angle = gyro.angle()
+        angle = heading()
         err = target - angle
         iterations += 1
 
@@ -160,7 +216,7 @@ def turn_to(target, timeout=None):
             log("TURN", "within +-1: angle={} err={} overshoot={}, stopping and settling".format(
                 angle, err, overshoot))
             wait(200)
-            settled = gyro.angle()
+            settled = heading()
             log("TURN", "settled angle={} (moved {} after stop)".format(settled, settled - angle))
             settled_over = (settled - target) * direction
             if settled_over > peak_overshoot:
@@ -189,7 +245,7 @@ def turn_to(target, timeout=None):
         wait(10)
 
     robot.stop()
-    final = gyro.angle()
+    final = heading()
     if reached:
         log("TURN", "DONE target={} final={} peak_overshoot={} iterations={} time={}ms".format(
             target, final, peak_overshoot, iterations, t.time()))
@@ -197,10 +253,15 @@ def turn_to(target, timeout=None):
         log("TURN", "TIMEOUT target={} final={} peak_overshoot={} iterations={} time={}ms".format(
             target, final, peak_overshoot, iterations, t.time()))
 
+    # Readings from before or during the turn say nothing about where the robot
+    # is now, so throw them away and let the vote start fresh.
+    in_turn = False
+    reset_color_debounce()
+
 
 def start_turn(delta, then):
     global turn_target
-    before = gyro.angle()
+    before = heading()
     turn_target = round((before + delta) / 90) * 90
     log("TURN", "start_turn delta={} gyro_now={} -> turn_target={} then={}".format(
         delta, before, turn_target, then))
@@ -209,9 +270,10 @@ def start_turn(delta, then):
 
 
 def autopilot_start():
-    global autopilot_active, turn_target
-    log("AUTO", "START - resetting gyro (was {})".format(gyro.angle()))
+    global autopilot_active, turn_target, heading_offset
+    log("AUTO", "START - resetting gyro (was {})".format(heading()))
     gyro.reset_angle(0)
+    heading_offset = 0
     turn_target = 0
     autopilot_active = True
     set_state("STRAIGHT", "autopilot start")
@@ -256,8 +318,12 @@ def do_manual():
 
 
 def do_finish():
-    """End of the maze: stop and turn autopilot off."""
-    global autopilot_active
+    """End of the maze: stop and turn autopilot off. Ignored until armed with 'o'."""
+    global autopilot_active, finish_armed
+    if not finish_armed:
+        log("COLOR", "FINISH color seen but not armed (press 'o' to arm), ignoring")
+        return
+    finish_armed = False        # one-shot: press 'o' again to re-arm
     if autopilot_active:
         autopilot_active = False
         stop_all()
@@ -274,9 +340,19 @@ COLOR_HANDLERS = {
 }
 
 
+def reset_color_debounce():
+    """Forget the color being confirmed (called after every turn)."""
+    global candidate, confidence
+    candidate = None
+    confidence = 0
+
+
 def check_color():
     """Debounced, edge-triggered color check: an action fires once when a new color is confirmed."""
     global last_color, candidate, confidence
+    if in_turn:
+        return
+
     color = color_sensor.color()
 
     if color == candidate:
@@ -326,11 +402,12 @@ def autopilot_step():
         if dist > OPEN_DIST:
             set_state("CLEAR_CORNER", "dist={} > OPEN_DIST={}".format(dist, OPEN_DIST))
             return
+        try_snap(dist)
         wall_error = dist - TARGET_DIST
         offset = max(-WALL_ANGLE_MAX, min(WALL_ANGLE_MAX, WALL_ANGLE_GAIN * wall_error))
         if log_due():
             log("FOLLOW", "dist={} wall_err={} offset={} gyro={}".format(
-                dist, wall_error, offset, gyro.angle()))
+                dist, wall_error, offset, heading()))
         drive_straight(MAZE_SPEED, turn_target + offset)
 
     elif state == "CLEAR_CORNER":
@@ -387,6 +464,9 @@ try:
                     autopilot_start()
                 elif key == "x":
                     autopilot_stop()
+                elif key == "o":
+                    finish_armed = True
+                    log("AUTO", "FINISH armed: the next FINISH color will end the run")
                 elif not autopilot_active:
                     if key == "w":
                         robot.drive(900, 0)
